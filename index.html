@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCII Forest Fire</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #020409; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  #screen {
+    font-family: "Courier New", Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.15;
+    letter-spacing: 0;
+    white-space: pre;
+    user-select: none;
+    color: #889;
+    text-shadow: 0 0 2px rgba(0,0,0,.8);
+  }
+  .vignette {
+    position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 78%, transparent 18%, rgba(0,0,0,.2) 60%, rgba(0,0,0,.55) 100%);
+  }
+</style>
+</head>
+<body>
+<pre id="screen"></pre>
+<div class="vignette"></div>
+<script>
+(() => {
+  'use strict';
+  const screen = document.getElementById('screen');
+  let cols = 120, rows = 44;
+  let grid, color, zbuf;
+  let stars = [], snow = [], embers = [], smokes = [];
+  let last = performance.now();
+
+  const clamp = (v,a,b) => v < a ? a : v > b ? b : v;
+  const rnd = (a,b) => a + Math.random() * (b - a);
+  const pick = a => a[(Math.random() * a.length) | 0];
+  const rgb = (r,g,b) => 'rgb(' + clamp(r|0,0,255) + ',' + clamp(g|0,0,255) + ',' + clamp(b|0,0,255) + ')';
+
+  function hash01(x,y,s=0) {
+    const n = Math.sin(x * 127.1 + y * 311.7 + s * 74.7) * 43758.5453;
+    return n - Math.floor(n);
+  }
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f);
+    let a = Math.sin(i * 127.1) * 43758.5453;
+    let b = Math.sin((i + 1) * 127.1) * 43758.5453;
+    a -= Math.floor(a); b -= Math.floor(b);
+    return a * (1 - u) + b * u;
+  }
+
+  function measure() {
+    const test = document.createElement('span');
+    test.textContent = 'MMMMMMMMMM';
+    test.style.font = getComputedStyle(screen).font;
+    test.style.visibility = 'hidden';
+    test.style.position = 'absolute';
+    test.style.whiteSpace = 'pre';
+    document.body.appendChild(test);
+    const cw = test.getBoundingClientRect().width / 10;
+    const lh = parseFloat(getComputedStyle(screen).lineHeight) || 14;
+    document.body.removeChild(test);
+    cols = clamp(Math.floor(window.innerWidth / cw) - 1, 70, 170);
+    rows = clamp(Math.floor(window.innerHeight / lh) - 1, 28, 60);
+    // adjust font size for fit
+    let fs = 12;
+    if (window.innerWidth / cols < 7) fs = 10;
+    if (window.innerWidth / cols > 11) fs = 14;
+    screen.style.fontSize = fs + 'px';
+    // remeasure with new font
+    const test2 = document.createElement('span');
+    test2.textContent = 'MMMMMMMMMM';
+    test2.style.font = getComputedStyle(screen).font;
+    test2.style.visibility = 'hidden';
+    test2.style.position = 'absolute';
+    document.body.appendChild(test2);
+    const cw2 = test2.getBoundingClientRect().width / 10;
+    const lh2 = parseFloat(getComputedStyle(screen).lineHeight) || fs * 1.15;
+    document.body.removeChild(test2);
+    cols = clamp(Math.floor(window.innerWidth / cw2) - 1, 70, 170);
+    rows = clamp(Math.floor(window.innerHeight / lh2) - 1, 28, 60);
+
+    grid = new Array(cols * rows).fill(' ');
+    color = new Array(cols * rows).fill(null);
+    zbuf = new Array(cols * rows).fill(-999);
+    initParticles();
+  }
+
+  function initParticles() {
+    stars = [];
+    const sn = Math.min(240, Math.floor(cols * rows / 16));
+    for (let i = 0; i < sn; i++) {
+      stars.push({
+        x: Math.floor(rnd(0, cols)), y: Math.floor(rnd(0, rows * 0.55)),
+        ch: pick(['.','.','.','*','+',"'",'`']),
+        ph: rnd(0, Math.PI*2), sp: rnd(0.4,2.0), br: rnd(0.3,0.9)
+      });
+    }
+    snow = [];
+    const nn = Math.min(220, Math.floor(cols * rows / 13));
+    for (let i = 0; i < nn; i++) snow.push(newSnow(rnd(0, rows)));
+    embers = []; smokes = [];
+  }
+  function newSnow(y) {
+    return { x: rnd(0, cols-1), y: y == null ? rnd(-2, rows) : y, z: rnd(0.3,1),
+      sp: rnd(1.5,4.2), sw: rnd(0,Math.PI*2), ch: pick(['.','.','*',"'",'`','+']) };
+  }
+
+  function clear() {
+    for (let i = 0; i < grid.length; i++) { grid[i] = ' '; color[i] = null; zbuf[i] = -999; }
+  }
+  function put(x, y, ch, col, z) {
+    x = Math.round(x); y = Math.round(y);
+    if (x < 0 || x >= cols || y < 0 || y >= rows) return;
+    const i = y * cols + x;
+    if (z >= zbuf[i]) { grid[i] = ch; color[i] = col; zbuf[i] = z; }
+  }
+
+  function groundY(x) {
+    const base = Math.floor(rows * 0.80);
+    const w = Math.sin(x*0.09)*1.4 + Math.sin(x*0.024+1.8)*2.0 + Math.sin(x*0.013+0.4)*1.2;
+    return clamp(Math.floor(base + w), Math.floor(rows*0.74), Math.floor(rows*0.86));
+  }
+  function clearR() { return Math.max(14, Math.floor(cols * 0.13)); }
+
+  function drawSky(t) {
+    for (let y = 0; y < Math.floor(rows*0.65); y += 2) {
+      for (let x = (y%4===0?0:2); x < cols; x += 4) {
+        if (hash01(x,y,99) < 0.04) put(x,y,'.', rgb(55,70,120), 0);
+      }
+    }
+    for (const s of stars) {
+      const tw = 0.45 + 0.55 * Math.sin(t * s.sp + s.ph);
+      const a = s.br * (0.35 + 0.65 * tw);
+      put(s.x, s.y, s.ch, rgb(150+60*a, 170+50*a, 210+45*a), 1);
+    }
+  }
+
+  function drawMoon(t) {
+    const mx = Math.floor(cols * 0.82), my = Math.floor(rows * 0.17);
+    const rad = Math.max(2, Math.floor(Math.min(cols, rows) * 0.035));
+    for (let dy = -rad; dy <= rad; dy++) {
+      for (let dx = -rad*2; dx <= rad*2; dx++) {
+        const d = (dx*dx)/((rad*2)*(rad*2)+0.01) + (dy*dy)/(rad*rad+0.01);
+        if (d > 1) continue;
+        const sx = dx + rad*0.7, sy = dy - rad*0.2;
+        const sh = (sx*sx)/((rad*1.5)*(rad*1.5)+0.01) + (sy*sy)/(rad*rad+0.01);
+        if (sh > 0.95) {
+          const gl = 0.7 + 0.1*Math.sin(t*0.4+dx*0.2);
+          const ch = dx < -rad ? '(' : dx > rad ? ')' : pick(['O','o','0','C']);
+          put(mx+dx, my+dy, ch, rgb(220*gl,235*gl,255*gl), 2);
+        }
+      }
+    }
+    for (let i=0;i<20;i++) {
+      const a=rnd(0,Math.PI*2), rr=rnd(rad*1.8, rad*3.4);
+      put(mx+Math.cos(a)*rr*2, my+Math.sin(a)*rr, '.', rgb(110,140,190), 1);
+    }
+  }
+
+  function drawTree(cx, baseY, height, layer, t) {
+    const darkness = [0.32, 0.58, 0.95][layer];
+    const zl = [5,10,20][layer];
+    const leafChars = [
+      ['.',':',',',';',"'"],
+      ['^','+','*',':','.'],
+      ['^','A','*','+','#','^']
+    ][layer];
+    const trunkH = Math.max(1, Math.floor(height*0.12));
+    const trunkW = height > 15 ? 3 : 1;
+    const halfTop = Math.max(1, Math.floor(height*0.52));
+    const foliageH = height - trunkH;
+    const fx = cols/2, fy = groundY(Math.floor(fx)) - 2;
+
+    for (let row=0; row<foliageH; row++) {
+      const yy = baseY - trunkH - row;
+      const prog = 1 - row / Math.max(1, foliageH-1);
+      const half = Math.max(0, Math.floor(prog * halfTop));
+      const sway = Math.sin(t*0.35 + cx*0.07 + row*0.08) * (0.25 + (1-prog)*0.8) * (0.3+layer*0.35);
+      for (let dx=-half; dx<=half; dx++) {
+        const xx = Math.round(cx + dx + sway);
+        const edge = Math.abs(dx) === half;
+        let ch = edge ? (dx < 0 ? '/' : '\\') : leafChars[Math.floor(hash01(cx+dx,yy,layer*13)*leafChars.length) % leafChars.length];
+        if (!edge && hash01(cx+dx,yy,77) > 0.93 && prog > 0.2) ch = pick(['*','.']);
+        const dd = Math.hypot(xx-fx, (yy-fy)*1.2);
+        const glow = clamp(1 - dd / Math.max(10, cols*0.18), 0, 1);
+        const gbase = 75 + layer*55 + hash01(xx,yy,5)*35;
+        const rr = (18+layer*10 + glow*150) * darkness;
+        const gg = (gbase + glow*60) * darkness;
+        const bb = (28+layer*12 + glow*12) * darkness;
+        const a = (edge ? 0.9 : 0.65 + hash01(xx,yy,9)*0.25);
+        put(xx, yy, ch, rgb(rr*a, gg*a, bb*a), zl);
+      }
+    }
+    for (let ty=0; ty<trunkH; ty++) {
+      const yy = baseY - ty;
+      for (let dx=-Math.floor(trunkW/2); dx<=Math.floor(trunkW/2); dx++) {
+        const xx = cx+dx;
+        const dd = Math.hypot(xx-fx, (yy-fy)*1.2);
+        const glow = clamp(1 - dd / Math.max(10, cols*0.16), 0, 1);
+        put(xx, yy, '|', rgb((85+layer*25+glow*120)*darkness, (55+layer*15+glow*50)*darkness, (30+glow*10)*darkness), zl-1);
+      }
+    }
+  }
+
+  function drawForest(t) {
+    const cx = cols/2, cr = clearR();
+    for (let x=2; x<cols-2; x+=6) {
+      const h = 8 + Math.floor(hash01(x,1,1)*8);
+      drawTree(x, groundY(x) - Math.floor(hash01(x,2,1)*2), h, 0, t);
+    }
+    for (let x=3; x<cols-3; x+=5) {
+      const h = 11 + Math.floor(hash01(x,3,2)*10);
+      drawTree(x, groundY(x) + 1 - Math.floor(hash01(x,4,2)*2), h, 1, t);
+    }
+    for (let x=2; x<cols-2; x+=4) {
+      if (Math.abs(x-cx) < cr) continue;
+      const dist = Math.abs(x-cx) - cr;
+      const h = 14 + Math.floor(hash01(x,5,3)*12) + Math.min(5, Math.floor(dist*0.08));
+      drawTree(x, groundY(x)+2, h, 2, t);
+    }
+    for (let x=0; x<cols; x+=3) {
+      const ed = Math.min(x, cols-1-x);
+      if (ed > cols*0.2 || Math.abs(x-cx) < cr-2) continue;
+      const h = 16 + Math.floor(hash01(x,7,4)*10);
+      drawTree(x, groundY(x)+2, h, 2, t);
+    }
+  }
+
+  function drawGround(t) {
+    const fx = cols/2, fy = groundY(Math.floor(fx)) - 2;
+    for (let x=0; x<cols; x++) {
+      const gy = groundY(x);
+      for (let y=gy; y<rows; y++) {
+        const depth = y - gy;
+        const n = hash01(x,y,11);
+        let ch = ' ';
+        if (depth === 0) ch = n < 0.6 ? '_' : n < 0.8 ? '.' : '-';
+        else if (n < 0.12) ch = ',';
+        else if (n < 0.22) ch = '.';
+        else if (n < 0.30) ch = "'";
+        else if (n < 0.36) ch = '`';
+        else if (n < 0.40 && depth > 2) ch = ':';
+        else if (n < 0.43 && depth > 4) ch = '~';
+        const snowCap = depth < 2 && n > 0.74;
+        if (snowCap) ch = depth === 0 ? '_' : pick(['.','*',"'"]);
+        const dd = Math.hypot(x-fx, (y-fy)*1.6);
+        const glow = clamp(1 - dd / Math.max(12, cols*0.16), 0, 1) * 0.9;
+        let rr,gg,bb,a;
+        if (snowCap) { rr=170+glow*70; gg=190+glow*40; bb=220; a=0.4+glow*0.2; }
+        else { rr=30+glow*180; gg=28+glow*90+Math.min(20,depth*2); bb=24+glow*25; a=0.22+Math.min(0.25,depth*0.03)+glow*0.15; }
+        put(x, y, ch, rgb(rr*a, gg*a, bb*a), depth===0 ? 4 : 3);
+      }
+    }
+  }
+
+  function drawFire(t, dt) {
+    const cx = Math.floor(cols/2);
+    const by = groundY(cx) + 1;
+    const fireH = Math.max(11, Math.floor(rows * 0.24));
+    const fireW = Math.max(8, Math.floor(cols * 0.075));
+
+    // ground glow
+    for (let dx=-fireW*3; dx<=fireW*3; dx++) {
+      for (let dy=-2; dy<=3; dy++) {
+        const x=cx+dx, y=by+dy;
+        const d = Math.sqrt(dx*dx*0.22 + dy*dy);
+        const glow = Math.max(0, 1 - d/(fireW*2.3));
+        if (glow > 0.05) {
+          const n = hash01(x,y,20);
+          const ch = n < 0.25 ? '.' : n < 0.4 ? ':' : n < 0.48 ? '*' : null;
+          if (ch) put(x,y,ch, rgb(255*glow, (90+80*glow)*glow, 20*glow), 6);
+        }
+      }
+    }
+    // logs
+    for (let dx=-fireW; dx<=fireW; dx++) {
+      const ch = dx===-fireW ? '(' : dx===fireW ? ')' : (dx+Math.floor(t*2))%3===0 ? '-' : '=';
+      put(cx+dx, by, ch, rgb(130,72,30), 30);
+    }
+    for (let dx=-Math.floor(fireW*0.7); dx<=Math.floor(fireW*0.7); dx++) {
+      const ch = dx===-Math.floor(fireW*0.7) ? '<' : dx===Math.floor(fireW*0.7) ? '>' : dx%2===0 ? '=' : '~';
+      put(cx+dx, by-1, ch, rgb(150,82,34), 30);
+    }
+    // embers bed
+    for (let dx=-fireW+1; dx<fireW; dx++) {
+      const flick = 0.5 + 0.5*Math.sin(t*8 + dx*0.7 + hash01(dx,0,5)*6);
+      const ch = flick>0.72?'@':flick>0.48?'#':flick>0.25?'*':'o';
+      put(cx+dx, by-2, ch, rgb(255, 80+flick*140, 20+flick*45), 31);
+    }
+    // flames
+    for (let fy=0; fy<fireH; fy++) {
+      const y = by - 3 - fy;
+      const hr = fy / Math.max(1, fireH-1);
+      const widthAt = fireW * (1 - Math.pow(hr,0.85)) * (0.72 + 0.28*noise1(t*3 + fy*0.28));
+      const sway = Math.sin(t*2.3 + fy*0.22)*(1+hr*3.2) + Math.sin(t*5.3+fy*0.45)*0.6;
+      const xs = Math.round(sway);
+      for (let dx=-Math.ceil(widthAt)-2; dx<=Math.ceil(widthAt)+2; dx++) {
+        const x = cx+dx+xs;
+        const dist = Math.abs(dx) / Math.max(1, widthAt);
+        const n = noise1(dx*0.42+t*6.2-fy*0.36)*0.6 + noise1(dx*0.9-t*4.3+fy*0.22)*0.4;
+        const intensity = (1-dist) * (1-hr*0.72) * (0.42 + n*0.85);
+        if (intensity < 0.23) continue;
+        let ch, rr,gg,bb,a;
+        if (intensity>0.78 && hr<0.45) { ch=pick(['@','#','%','W']); rr=255;gg=235;bb=170;a=0.98; }
+        else if (intensity>0.58) { ch=pick(['#','*','%','+']); rr=255;gg=150+(1-hr)*70;bb=35;a=0.92; }
+        else if (intensity>0.40) { ch=pick(['*','+','^','~']); rr=255;gg=95+(1-hr)*55;bb=20;a=0.78; }
+        else { ch=pick(['.','`',"'",'^',':']); rr=220;gg=55+(1-hr)*35;bb=15;a=0.55; }
+        put(x, y, ch, rgb(rr*a,gg*a,bb*a), 40 + Math.floor(intensity*10));
+      }
+    }
+
+    if (Math.random() < 0.7) embers.push({x:cx+rnd(-2.5,2.5),y:by-rnd(2,5),vx:rnd(-3.5,3.5),vy:-rnd(5,11),life:rnd(0.5,1.8),max:1.8,ch:pick(['.','*',"'",'`','+'])});
+    if (Math.random() < 0.22) smokes.push({x:cx+rnd(-2.5,2.5),y:by-rnd(6,10),vx:rnd(-1.2,1.2),vy:-rnd(2.5,5.5),life:rnd(1.5,3.5),max:3.5,ch:pick(['.','o','O','~','*',':'])});
+
+    for (let i=embers.length-1; i>=0; i--) {
+      const e = embers[i];
+      e.x += e.vx*dt + Math.sin(t*4+e.y)*0.35*dt;
+      e.y += e.vy*dt; e.vy += 1.8*dt; e.vx *= 0.995; e.life -= dt;
+      if (e.life <= 0) { embers.splice(i,1); continue; }
+      const a = e.life/e.max;
+      put(e.x, e.y, e.ch, rgb(255*a, (140+80*a)*a, 30*a), 45);
+    }
+    for (let i=smokes.length-1; i>=0; i--) {
+      const s = smokes[i];
+      s.x += s.vx*dt + Math.sin(t*0.8+s.y*0.2)*0.8*dt;
+      s.y += s.vy*dt; s.vx *= 0.99; s.life -= dt;
+      if (s.life <= 0 || s.y < -1) { smokes.splice(i,1); continue; }
+      const a = (s.life/s.max)*0.28;
+      const val = 130 + 30*a;
+      put(s.x, s.y, s.ch, rgb(val*a, val*a, (val+20)*a), 35);
+    }
+  }
+
+  function drawSnow(t, dt) {
+    for (const p of snow) {
+      p.y += p.sp * p.z * dt;
+      p.x += Math.sin(t*0.7 + p.sw) * 0.45 * dt;
+      if (p.y >= rows) { p.y = -1; p.x = rnd(0, cols-1); }
+      if (p.x < 0) p.x += cols;
+      if (p.x >= cols) p.x -= cols;
+      const x = Math.round(p.x), y = Math.round(p.y);
+      if (x>=0 && x<cols && y>=0 && y<rows) {
+        const i = y*cols+x;
+        if (zbuf[i] < 30) {
+          const a = 0.2 + p.z*0.45;
+          put(x,y,p.ch, rgb(190*a+40, 210*a+40, 240*a+40), 25);
+        }
+      }
+    }
+  }
+
+  function escapeHtml(s) {
+    return s === '&' ? '&amp;' : s === '<' ? '&lt;' : s === '>' ? '&gt;' : s;
+  }
+
+  function render() {
+    let html = '';
+    let lastCol = null;
+    for (let y=0; y<rows; y++) {
+      const base = y*cols;
+      for (let x=0; x<cols; x++) {
+        const i = base+x;
+        const ch = grid[i];
+        const col = color[i];
+        if (ch === ' ' || !col) {
+          if (lastCol !== null) { html += '</span>'; lastCol = null; }
+          html += ' ';
+        } else {
+          if (col !== lastCol) {
+            if (lastCol !== null) html += '</span>';
+            html += '<span style="color:' + col + '">';
+            lastCol = col;
+          }
+          html += escapeHtml(ch);
+        }
+      }
+      if (lastCol !== null) { html += '</span>'; lastCol = null; }
+      if (y < rows-1) html += '\n';
+    }
+    screen.innerHTML = html;
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const t = now / 1000;
+    clear();
+    drawSky(t);
+    drawMoon(t);
+    drawForest(t);
+    drawGround(t);
+    drawFire(t, dt);
+    drawSnow(t, dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', () => { measure(); });
+  measure();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
